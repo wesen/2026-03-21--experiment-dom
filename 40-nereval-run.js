@@ -1,34 +1,44 @@
 // 40-nereval-run.js — Scrape nereval property list + detail pages, store in SQLite
-//
-// Usage:
-//   node 40-nereval-run.js                          # default: Providence, pages 1-3
-//   node 40-nereval-run.js --town Providence --pages 10
-//   node 40-nereval-run.js --town Providence --pages all
-//   node 40-nereval-run.js --start 3 --pages 7      # scrape pages 3 through 7
-//   node 40-nereval-run.js --start 6 --pages 10     # scrape pages 6 through 10
-//   node 40-nereval-run.js --no-details              # list pages only, skip detail fetches
-//   node 40-nereval-run.js --workers 5               # 5 parallel detail fetchers
-//   node 40-nereval-run.js --workers 10 --rps 20     # 10 workers, max 20 req/s
-//
-// Options:
-//   --town <name>    Town name (default: Providence)
-//   --pages <N|all>  Last page number to scrape (default: 3)
-//   --start <N>      First page number to scrape (default: 1). Pages before this are
-//                    fast-forwarded (fetched for viewstate but not extracted).
-//   --db <path>      SQLite database path (default: nereval-providence.db)
-//   --delay <ms>     Delay between requests in ms for list pages (default: 500)
-//   --no-details     Skip phase 2 (detail page fetching). Only crawl the list.
-//   --workers <N>    Number of parallel workers for detail fetching (default: 1)
-//   --rps <N>        Max requests per second across all workers (default: 5).
-//                    Each worker sleeps (1000*workers/rps) ms between requests.
 
 const { fetchListPage, fetchNextPage, getFormState, hasNextPage, fetchDetailPage } = require('./37-nereval-fetch');
 const { extractListRows, extractDetail } = require('./38-nereval-extract');
 const { openDb, upsertProperty, storeDetail } = require('./39-nereval-db');
 
+const HELP = `
+Usage: node 40-nereval-run.js [options]
+
+Scrapes property data from data.nereval.com and stores it in SQLite.
+Crawls the paginated list, then fetches each property's detail page.
+
+Options:
+  --town <name>     Town name (default: Providence)
+  --pages <N|all>   Last page number to scrape (default: 3)
+  --start <N>       First page to scrape (default: 1). Earlier pages are
+                    fast-forwarded (fetched for viewstate but not extracted).
+  --db <path>       SQLite database path (default: nereval-<town>.db)
+  --delay <ms>      Delay between list page requests in ms (default: 500)
+  --no-details      Skip detail page fetching. Only crawl the list.
+  --workers <N>     Parallel workers for detail fetching (default: 1)
+  --rps <N>         Max requests/second across all workers (default: 1)
+  --help, -h        Show this help message
+
+Examples:
+  node 40-nereval-run.js                            # Providence, pages 1-3, 1 rps
+  node 40-nereval-run.js --pages 10                 # first 10 pages
+  node 40-nereval-run.js --pages all                # all pages
+  node 40-nereval-run.js --start 3 --pages 7        # pages 3 through 7
+  node 40-nereval-run.js --workers 3 --rps 2        # 3 workers, max 2 req/s
+  node 40-nereval-run.js --no-details --pages all   # list crawl only (fast)
+  node 40-nereval-run.js --town Cranston --pages 5  # different town
+`.trim();
+
 function parseArgs() {
   const args = process.argv.slice(2);
-  const opts = { town: 'Providence', pages: 3, start: 1, db: null, delay: 500, noDetails: false, workers: 1, rps: 5 };
+  if (args.includes('--help') || args.includes('-h')) {
+    console.log(HELP);
+    process.exit(0);
+  }
+  const opts = { town: 'Providence', pages: 3, start: 1, db: null, delay: 500, noDetails: false, workers: 1, rps: 1 };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--town') opts.town = args[++i];
     else if (args[i] === '--pages') opts.pages = args[i + 1] === 'all' ? Infinity : parseInt(args[++i]);
