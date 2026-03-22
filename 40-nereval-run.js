@@ -46,31 +46,30 @@ function parseArgs() {
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 /**
- * Simple token-bucket rate limiter shared across all workers.
- * Enforces a max request rate of `rps` requests per second.
+ * Serialized rate limiter — ensures at most `rps` requests per second globally.
+ * All workers acquire a slot through a single promise chain, guaranteeing order
+ * and preventing burst traffic from overwhelming the server.
  */
 function createRateLimiter(rps) {
-  const minInterval = 1000 / rps; // ms between requests
-  let lastRequest = 0;
-  let queue = Promise.resolve();
+  const minInterval = 1000 / rps;
+  let gate = Promise.resolve();
 
   return function acquire() {
-    // Chain all callers so they wait in order
-    queue = queue.then(async () => {
-      const now = Date.now();
-      const elapsed = now - lastRequest;
-      if (elapsed < minInterval) {
-        await sleep(minInterval - elapsed);
-      }
-      lastRequest = Date.now();
-    });
-    return queue;
+    const ticket = gate.then(() => sleep(minInterval));
+    gate = ticket;
+    return ticket;
   };
 }
 
 /**
- * Fetch detail pages in parallel using a worker pool with rate limiting.
- * DB writes are serialized (better-sqlite3 is synchronous, so no contention).
+ * Fetch detail pages using a pool of concurrent workers with shared rate limiting.
+ *
+ * Workers pull from a shared job array via an atomic index. The rate limiter
+ * serializes outbound requests so the server never sees more than `rps` req/s
+ * regardless of worker count. Workers add concurrency for the network latency
+ * (while one worker waits for a response, another can start its request).
+ *
+ * DB writes are safe: better-sqlite3 is synchronous and single-threaded.
  */
 async function fetchDetailsParallel(db, accounts, opts) {
   const items = [...accounts.entries()].filter(([, row]) => row.detailUrl);
@@ -79,19 +78,23 @@ async function fetchDetailsParallel(db, accounts, opts) {
   let errors = 0;
   const limiter = createRateLimiter(opts.rps);
 
-  // Shared work queue — workers pull from this
+  // Shared atomic-ish index (safe because JS is single-threaded for sync ops)
   let nextIdx = 0;
 
   async function worker(workerId) {
+    // Stagger worker start so they don't all fire simultaneously
+    await sleep(workerId * (1000 / opts.rps / opts.workers));
+
     while (true) {
       const idx = nextIdx++;
       if (idx >= items.length) break;
 
       const [acct, row] = items[idx];
 
-      await limiter(); // wait for rate limit token
+      await limiter(); // wait for rate-limit slot
 
-      const label = `  [${++completed}/${total}] (w${workerId}) ${acct} ${row.location}`;
+      const seq = ++completed;
+      const label = `  [${seq}/${total}] (w${workerId}) ${acct} ${row.location}`;
       try {
         const { document: detailDoc } = await fetchDetailPage(row.detailUrl);
         const detail = extractDetail(detailDoc);
@@ -104,12 +107,11 @@ async function fetchDetailsParallel(db, accounts, opts) {
     }
   }
 
-  // Launch worker pool
-  const workers = [];
+  const workerPromises = [];
   for (let i = 1; i <= opts.workers; i++) {
-    workers.push(worker(i));
+    workerPromises.push(worker(i));
   }
-  await Promise.all(workers);
+  await Promise.all(workerPromises);
 
   return { completed: total, errors };
 }
