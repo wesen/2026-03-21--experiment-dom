@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:news.ycombinator.com)",
+      "Bash(node -e \"try { require\\(''jsdom''\\); console.log\\(''jsdom available''\\) } catch\\(e\\) { console.log\\(''no jsdom''\\) }\")",
+      "Bash(node -e \"try { require\\(''cheerio''\\); console.log\\(''cheerio available''\\) } catch\\(e\\) { console.log\\(''no cheerio''\\) }\")",
+      "Bash(npm init:*)",
+      "Bash(npm install:*)",
+      "Bash(node:*)",
+      "Skill(claude-api)",
+      "Bash(claude --version)",
+      "Bash(npm list:*)",
+      "Bash(git status:*)"
+    ]
+  }
+}
