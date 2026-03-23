@@ -12,13 +12,18 @@ Topics:
 DocType: index
 Intent: long-term
 Owners: []
-RelatedFiles: []
+RelatedFiles:
+    - Path: nereval/app.mjs
+      Note: Combined Express server with job queue
+    - Path: nereval/worker.js
+      Note: EventEmitter-based scraper worker
 ExternalSources: []
 Summary: ""
 LastUpdated: 2026-03-22T22:04:34.535714155-04:00
 WhatFor: ""
 WhenToUse: ""
 ---
+
 
 # Nereval property scraper web application with job queue and proxy support
 
