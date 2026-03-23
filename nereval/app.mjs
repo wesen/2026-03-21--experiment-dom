@@ -324,21 +324,98 @@ app.get('/api/stats', (req, res) => {
 app.get('/api/landlords', (req, res) => {
   const limit = parseInt(req.query.limit) || 50;
   const minProperties = parseInt(req.query.min) || 2;
+  const search = req.query.search || '';
+  const sort = req.query.sort || 'count'; // count, value, name
+
+  let having = 'COUNT(DISTINCT o.account_number) >= ?';
+  const params = [];
+  if (search) {
+    having += ' AND o.owner_name LIKE ?';
+    params.push(minProperties, `%${search}%`);
+  } else {
+    params.push(minProperties);
+  }
+
+  const orderBy = {
+    count: 'property_count DESC, total_assessed DESC',
+    value: 'total_assessed DESC, property_count DESC',
+    name: 'o.owner_name ASC',
+  }[sort] || 'property_count DESC, total_assessed DESC';
+
   const landlords = db.prepare(`
     SELECT
       o.owner_name,
       COUNT(DISTINCT o.account_number) as property_count,
+      GROUP_CONCAT(DISTINCT o.account_number) as account_numbers,
       GROUP_CONCAT(DISTINCT p.location) as locations,
       SUM(CAST(REPLACE(REPLACE(a.parcel_total, '$', ''), ',', '') AS INTEGER)) as total_assessed
     FROM owners o
     JOIN properties p ON o.account_number = p.account_number
     LEFT JOIN assessments a ON o.account_number = a.account_number
     GROUP BY o.owner_name
-    HAVING COUNT(DISTINCT o.account_number) >= ?
-    ORDER BY property_count DESC, total_assessed DESC
+    HAVING ${having}
+    ORDER BY ${orderBy}
     LIMIT ?
-  `).all(minProperties, limit);
+  `).all(...params, limit);
   res.json(landlords);
+});
+
+// Multi-unit analysis
+app.get('/api/multiunit', (req, res) => {
+  const sort = req.query.sort || 'value'; // value, area, design
+  const design = req.query.design || '';
+  const limit = parseInt(req.query.limit) || 50;
+
+  let where = "(b.design LIKE '%Family%' OR b.design LIKE '%Apt%' OR b.design LIKE '%Multi%' OR b.design LIKE '%Duplex%' OR b.design LIKE '%Triple%' OR b.design LIKE '%Condo%')";
+  const params = [];
+
+  if (design) {
+    where = 'b.design = ?';
+    params.push(design);
+  }
+
+  const orderBy = {
+    value: 'value_num DESC',
+    area: 'area_num DESC',
+    design: 'b.design ASC, value_num DESC',
+    year: 'b.year_built DESC',
+  }[sort] || 'value_num DESC';
+
+  const rows = db.prepare(`
+    SELECT
+      p.account_number, p.location, a.parcel_total,
+      CAST(REPLACE(REPLACE(a.parcel_total, '$', ''), ',', '') AS INTEGER) as value_num,
+      b.design, b.year_built, b.rooms, b.bedrooms, b.bathrooms, b.above_grade_area,
+      CAST(REPLACE(REPLACE(b.above_grade_area, ' SF', ''), ',', '') AS INTEGER) as area_num,
+      o_agg.owners,
+      CASE
+        WHEN CAST(REPLACE(REPLACE(a.parcel_total, '$', ''), ',', '') AS INTEGER) > 0
+         AND CAST(REPLACE(REPLACE(b.above_grade_area, ' SF', ''), ',', '') AS INTEGER) > 0
+        THEN ROUND(CAST(CAST(REPLACE(REPLACE(a.parcel_total, '$', ''), ',', '') AS INTEGER) AS REAL)
+             / CAST(REPLACE(REPLACE(b.above_grade_area, ' SF', ''), ',', '') AS INTEGER), 0)
+        ELSE NULL
+      END as value_per_sqft
+    FROM properties p
+    JOIN buildings b ON p.account_number = b.account_number
+    LEFT JOIN assessments a ON p.account_number = a.account_number
+    LEFT JOIN (SELECT account_number, GROUP_CONCAT(owner_name, '; ') as owners FROM owners GROUP BY account_number) o_agg ON p.account_number = o_agg.account_number
+    WHERE ${where}
+    ORDER BY ${orderBy}
+    LIMIT ?
+  `).all(...params, limit);
+
+  // Design type summary
+  const designSummary = db.prepare(`
+    SELECT b.design, COUNT(*) as count,
+      AVG(CAST(REPLACE(REPLACE(a.parcel_total, '$', ''), ',', '') AS INTEGER)) as avg_value,
+      SUM(CAST(REPLACE(REPLACE(a.parcel_total, '$', ''), ',', '') AS INTEGER)) as total_value
+    FROM buildings b
+    LEFT JOIN assessments a ON b.account_number = a.account_number
+    WHERE b.design LIKE '%Family%' OR b.design LIKE '%Apt%' OR b.design LIKE '%Multi%' OR b.design LIKE '%Duplex%' OR b.design LIKE '%Triple%' OR b.design LIKE '%Condo%'
+    GROUP BY b.design ORDER BY count DESC
+  `).all();
+
+  res.json({ rows, designSummary });
 });
 
 app.get('/api/properties', (req, res) => {
@@ -633,6 +710,7 @@ const HTML = `<!DOCTYPE html>
     <div class="tab active" data-tab="properties">Properties</div>
     <div class="tab" data-tab="landlords">Top Landlords</div>
     <div class="tab" data-tab="biggest">Biggest</div>
+    <div class="tab" data-tab="multiunit">Multi-Unit</div>
     <div class="tab" data-tab="scraper">Scraper</div>
   </div>
 
@@ -653,6 +731,21 @@ const HTML = `<!DOCTYPE html>
   </div>
 
   <div class="tab-content" id="tab-landlords">
+    <div class="search-bar">
+      <input type="text" id="landlord-search" placeholder="Search owner name...">
+      <select id="landlord-sort" onchange="loadLandlords()">
+        <option value="count">Sort: Most Properties</option>
+        <option value="value">Sort: Highest Value</option>
+        <option value="name">Sort: Name</option>
+      </select>
+      <select id="landlord-min" onchange="loadLandlords()">
+        <option value="1">Min: 1 property</option>
+        <option value="2" selected>Min: 2 properties</option>
+        <option value="3">Min: 3 properties</option>
+        <option value="5">Min: 5 properties</option>
+      </select>
+      <button onclick="loadLandlords()">Search</button>
+    </div>
     <div id="landlords-table"></div>
   </div>
 
@@ -665,6 +758,22 @@ const HTML = `<!DOCTYPE html>
       </select>
     </div>
     <div id="biggest-table"></div>
+  </div>
+
+  <div class="tab-content" id="tab-multiunit">
+    <div class="search-bar">
+      <select id="multiunit-design" onchange="loadMultiunit()">
+        <option value="">All multi-unit types</option>
+      </select>
+      <select id="multiunit-sort" onchange="loadMultiunit()">
+        <option value="value">Sort: Assessed Value</option>
+        <option value="area">Sort: Living Area</option>
+        <option value="design">Sort: Design Type</option>
+        <option value="year">Sort: Year Built</option>
+      </select>
+    </div>
+    <div id="multiunit-summary" style="margin-bottom:16px"></div>
+    <div id="multiunit-table"></div>
   </div>
 
   <div class="tab-content" id="tab-scraper">
@@ -846,15 +955,69 @@ function loadProperties() {
 
 // \\u2500\\u2500 Landlords \\u2500\\u2500
 function loadLandlords() {
-  fetch('/api/landlords?min=1&limit=100').then(r => r.json()).then(data => {
+  const search = ($('#landlord-search') || {}).value || '';
+  const sort = ($('#landlord-sort') || {}).value || 'count';
+  const min = ($('#landlord-min') || {}).value || '2';
+  const params = new URLSearchParams({ search, sort, min, limit: 100 });
+  fetch('/api/landlords?' + params).then(r => r.json()).then(data => {
     $('#landlords-table').innerHTML = '<table><thead><tr>' +
-      '<th>Owner</th><th class="text-right">Properties</th><th class="text-right">Total Assessed</th><th>Locations</th>' +
+      '<th>Owner</th><th class="text-right">Properties</th><th class="text-right">Total Assessed</th><th>Properties</th>' +
       '</tr></thead><tbody>' +
-      data.map(r => '<tr>' +
-        '<td><strong>' + r.owner_name + '</strong></td>' +
-        '<td class="text-right"><span class="badge ' + (r.property_count >= 3 ? 'badge-orange' : 'badge-green') + '">' + r.property_count + '</span></td>' +
-        '<td class="text-right text-mono" style="color:#3fb950">' + fmt(r.total_assessed) + '</td>' +
-        '<td style="font-size:12px;color:#8b949e">' + (r.locations || '').split(',').join(', ') + '</td>' +
+      data.map(r => {
+        const accts = (r.account_numbers || '').split(',');
+        const locs = (r.locations || '').split(',');
+        const propLinks = accts.map((a, i) =>
+          '<a href="#" onclick="showDetail(\\'' + a.trim() + '\\');return false" style="font-size:12px">' + (locs[i] || a).trim() + '</a>'
+        ).slice(0, 5).join(', ') + (accts.length > 5 ? ' <span style="color:#8b949e">+' + (accts.length - 5) + ' more</span>' : '');
+        return '<tr>' +
+          '<td><strong>' + r.owner_name + '</strong></td>' +
+          '<td class="text-right"><span class="badge ' + (r.property_count >= 5 ? 'badge-red' : r.property_count >= 3 ? 'badge-orange' : 'badge-green') + '">' + r.property_count + '</span></td>' +
+          '<td class="text-right text-mono" style="color:#3fb950">' + fmt(r.total_assessed) + '</td>' +
+          '<td>' + propLinks + '</td>' +
+          '</tr>';
+      }).join('') +
+      '</tbody></table>';
+  });
+}
+$('#landlord-search')?.addEventListener('keydown', e => { if (e.key === 'Enter') loadLandlords(); });
+
+// \\u2500\\u2500 Multi-Unit \\u2500\\u2500
+function loadMultiunit() {
+  const design = ($('#multiunit-design') || {}).value || '';
+  const sort = ($('#multiunit-sort') || {}).value || 'value';
+  const params = new URLSearchParams({ design, sort, limit: 50 });
+  fetch('/api/multiunit?' + params).then(r => r.json()).then(d => {
+    // Design summary cards
+    if (d.designSummary && d.designSummary.length) {
+      const sel = $('#multiunit-design');
+      const existing = new Set([...sel.options].map(o => o.value));
+      d.designSummary.forEach(ds => {
+        if (!existing.has(ds.design)) {
+          const opt = document.createElement('option');
+          opt.value = ds.design; opt.textContent = ds.design + ' (' + ds.count + ')';
+          sel.appendChild(opt);
+        }
+      });
+      $('#multiunit-summary').innerHTML = '<div class="stats-grid">' +
+        d.designSummary.slice(0, 6).map(ds =>
+          '<div class="stat-card"><div class="label">' + ds.design + '</div>' +
+          '<div class="value" style="font-size:20px">' + ds.count + '</div>' +
+          '<div style="font-size:12px;color:#3fb950">Avg: ' + fmt(Math.round(ds.avg_value || 0)) + '</div></div>'
+        ).join('') + '</div>';
+    }
+
+    $('#multiunit-table').innerHTML = '<table><thead><tr>' +
+      '<th>Location</th><th>Owner(s)</th><th class="text-right">Assessed</th><th>Design</th><th>Year</th><th class="text-right">Area</th><th class="text-right">$/sqft</th><th>Rooms</th>' +
+      '</tr></thead><tbody>' +
+      d.rows.map(r => '<tr onclick="showDetail(\\'' + r.account_number + '\\')" style="cursor:pointer">' +
+        '<td><strong>' + (r.location || '') + '</strong><br><span class="text-mono" style="color:#8b949e">' + (r.account_number || '') + '</span></td>' +
+        '<td style="font-size:12px">' + (r.owners || '').split('; ').slice(0, 2).join(', ') + '</td>' +
+        '<td class="text-right text-mono" style="color:#3fb950">' + (r.parcel_total || '\\u2014') + '</td>' +
+        '<td><span class="badge badge-blue">' + (r.design || '\\u2014') + '</span></td>' +
+        '<td>' + (r.year_built || '\\u2014') + '</td>' +
+        '<td class="text-right text-mono">' + (r.above_grade_area || '\\u2014') + '</td>' +
+        '<td class="text-right text-mono">' + (r.value_per_sqft ? '$' + r.value_per_sqft : '\\u2014') + '</td>' +
+        '<td>' + [r.rooms && r.rooms + 'rm', r.bedrooms && r.bedrooms + 'bd', r.bathrooms && r.bathrooms + 'ba'].filter(Boolean).join(', ') + '</td>' +
         '</tr>').join('') +
       '</tbody></table>';
   });
@@ -1138,6 +1301,7 @@ loadStats();
 loadProperties();
 loadBiggest();
 loadLandlords();
+loadMultiunit();
 
 $('#search').addEventListener('keydown', e => { if (e.key === 'Enter') loadProperties(); });
 
