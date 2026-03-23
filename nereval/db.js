@@ -139,6 +139,7 @@ function createTables(db) {
       account_number  TEXT NOT NULL,
       detail_url      TEXT NOT NULL,
       town            TEXT NOT NULL,
+      location        TEXT,
       status          TEXT NOT NULL DEFAULT 'pending',
       job_id          INTEGER,
       attempts        INTEGER DEFAULT 0,
@@ -365,11 +366,15 @@ function setConfigBulk(db, obj) {
 
 // ── Detail Queue CRUD ────────────────────────────────────────────────────────
 
-function enqueueDetail(db, { accountNumber, detailUrl, town, jobId = null }) {
+function enqueueDetail(db, { accountNumber, detailUrl, town, location = null, jobId = null }) {
+  // Migrate existing DBs missing location column
+  try { db.prepare("SELECT location FROM detail_queue LIMIT 0").get(); } catch {
+    db.exec("ALTER TABLE detail_queue ADD COLUMN location TEXT");
+  }
   db.prepare(`
-    INSERT OR IGNORE INTO detail_queue (account_number, detail_url, town, job_id)
-    VALUES (?, ?, ?, ?)
-  `).run(accountNumber, detailUrl, town, jobId);
+    INSERT OR IGNORE INTO detail_queue (account_number, detail_url, town, location, job_id)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(accountNumber, detailUrl, town, location, jobId);
 }
 
 /**
@@ -420,15 +425,15 @@ function getQueueStats(db) {
   return stats;
 }
 
-function getQueueItems(db, { status = null, limit = 50, offset = 0 } = {}) {
-  if (status) {
-    return db.prepare(
-      'SELECT * FROM detail_queue WHERE status = ? ORDER BY id LIMIT ? OFFSET ?'
-    ).all(status, limit, offset);
-  }
-  return db.prepare(
-    'SELECT * FROM detail_queue ORDER BY id LIMIT ? OFFSET ?'
-  ).all(limit, offset);
+function getQueueItems(db, { status = null, search = null, limit = 50, offset = 0 } = {}) {
+  let where = '1=1';
+  const params = [];
+  if (status) { where += ' AND status = ?'; params.push(status); }
+  if (search) { where += ' AND (account_number LIKE ? OR location LIKE ?)'; params.push(`%${search}%`, `%${search}%`); }
+
+  const rows = db.prepare(`SELECT * FROM detail_queue WHERE ${where} ORDER BY id LIMIT ? OFFSET ?`).all(...params, limit, offset);
+  const total = db.prepare(`SELECT COUNT(*) as n FROM detail_queue WHERE ${where}`).get(...params).n;
+  return { rows, total, limit, offset };
 }
 
 function retryFailedDetails(db, { maxAttempts = 10 } = {}) {

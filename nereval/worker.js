@@ -104,6 +104,7 @@ function runListCrawl(db, job, opts = {}) {
               accountNumber: row.accountNumber,
               detailUrl: row.detailUrl,
               town: job.town,
+              location: row.location || null,
               jobId: job.id,
             });
             enqueued++;
@@ -192,7 +193,7 @@ function runDetailFetch(db, job, opts = {}) {
             updateJob(db, job.id, { details_done: completed, errors });
             emitter.emit('detail', {
               account: item.account_number,
-              location: detail.parcel?.['Location'] || item.account_number,
+              location: item.location || detail.parcel?.['Location'] || item.account_number,
               sales: detail.sales.length,
               priorYears: detail.priorAssessments.length,
               seq: completed,
