@@ -795,11 +795,11 @@ const HTML = `<!DOCTYPE html>
         </div>
         <div class="form-group">
           <label>Workers</label>
-          <input type="number" id="job-workers" value="1" min="1" max="10">
+          <input type="number" id="job-workers" value="1" min="1" max="20">
         </div>
         <div class="form-group">
           <label>Requests/sec</label>
-          <input type="number" id="job-rps" value="1" min="0.1" max="10" step="0.1">
+          <input type="number" id="job-rps" value="1" min="0.1" max="20" step="0.1">
         </div>
         <div class="form-group">
           <label>Options</label>
@@ -859,11 +859,11 @@ const HTML = `<!DOCTYPE html>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
       <div class="form-group">
         <label>Default Workers</label>
-        <input type="number" id="cfg-workers" value="1" min="1" max="10" style="width:100%">
+        <input type="number" id="cfg-workers" value="1" min="1" max="20" style="width:100%">
       </div>
       <div class="form-group">
         <label>Default RPS</label>
-        <input type="number" id="cfg-rps" value="1" min="0.1" max="10" step="0.1" style="width:100%">
+        <input type="number" id="cfg-rps" value="1" min="0.1" max="20" step="0.1" style="width:100%">
       </div>
     </div>
     <div class="modal-actions">
