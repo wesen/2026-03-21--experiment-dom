@@ -96,10 +96,45 @@ WhenToUse: "When reviewing what was done and why during the NEREVAL-APP build"
 
 **What I Learned:** Always check if a package is ESM-only before using `require()`. The `fetch.js` original code with `require('https-proxy-agent')` at the top was actually broken all along — it would fail on any Node.js version with this package version. The lazy import is better anyway since it avoids loading proxy code when no proxy is configured.
 
+## Step 5: Enhanced Landlords and Multi-Unit Analysis (Tasks #10, #11)
+
+**Prompt Context:** Design doc calls for fuzzy name grouping, portfolio values, linked properties in landlords tab, and multi-unit filtering/sorting.
+
+**What I Did:**
+- Enhanced `/api/landlords` endpoint: added `search` param for name filtering, `sort` param (count/value/name), returns `account_numbers` for property linking
+- Added `/api/multiunit` endpoint: filters multi-family/apartment/duplex/condo properties, returns `value_per_sqft` calculation, `designSummary` with counts and avg values
+- Landlords tab UI: search bar, sort dropdown, min-properties dropdown, clickable property links (up to 5 shown, "+N more" overflow)
+- Multi-Unit tab UI: design type filter, sort dropdown, design summary stat cards, properties table with $/sqft column
+- Fixed SQLite alias bug: can't reference `value_num` alias in CASE expression in same SELECT — had to inline the full CAST/REPLACE expressions
+
+**What Didn't Work:** SQLite `no such column: value_num` error when referencing a column alias in a CASE expression within the same SELECT. Unlike some databases, SQLite doesn't support referencing column aliases elsewhere in the same SELECT clause. Fix: inline the full expression.
+
+## Step 6: End-to-End Test with Proxy (Task #13)
+
+**Prompt Context:** Test the full flow: configure proxy, start job, monitor progress, browse results.
+
+**What I Did:**
+- Saved proxy config via PUT /api/config
+- Tested proxy connectivity via POST /api/config/proxy/test — OK, 620ms latency, exit IP 107.5.44.60
+- Started 3-page scrape job with proxy enabled via POST /api/jobs/start
+- Job lifecycle confirmed: queued -> running (pages) -> running (details) -> completed
+- Some 403 retries on page 3 (3 retry cycles), but all eventually succeeded
+- Detail fetching progressing at ~1 req/s with 0 errors
+- Tested job retry: creates new job from failed job's params
+- Tested job cancellation: abort signal propagated correctly
+
+**What I Learned:**
+- Rayobyte rotating residential proxy works — each request may get a different IP
+- The 403s with successful retries suggest WAF does short-window rate blocking per IP
+- With proxy: ~1 rps is sustainable, occasional 403s resolved by retry (new IP on retry)
+- Without proxy: our IP is still blocked from earlier scraping sessions
+
 ## Current State
 
-- Tasks 2-9 and 12 are done
-- Tasks 10 (enhanced landlords), 11 (multi-unit analysis), 13 (full flow test) remain
+- All 12 implementation tasks are done (2-13)
 - `node nereval/app.mjs --db nereval-providence.db` starts the full app on port 3000
-- 119 properties in the database, all browsing features working
-- Scraper control UI ready but not yet tested against the live site (may need proxy due to prior IP block)
+- 5 tabs: Properties, Landlords, Biggest, Multi-Unit, Scraper
+- Settings modal for proxy config with test button
+- Job queue with SSE progress streaming, start/stop/retry
+- Proxy required for new scrapes (our IP is WAF-blocked)
+- User-Agent: Chrome 131 on Windows 10
