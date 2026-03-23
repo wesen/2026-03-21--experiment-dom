@@ -10,7 +10,12 @@
       "Skill(claude-api)",
       "Bash(claude --version)",
       "Bash(npm list:*)",
-      "Bash(git status:*)"
+      "Bash(git status:*)",
+      "Bash(sqlite3:*)",
+      "Bash(sqlite3 nereval-providence.db \".mode column\" \".headers on\" \"SELECT COUNT\\(DISTINCT account_number\\) as with_buildings FROM buildings WHERE design <> '''';\")",
+      "Bash(git mv:*)",
+      "Bash(curl -s \"http://localhost:3000/api/multiunit?sort=value&limit=3\")",
+      "Bash(curl:*)"
     ]
   }
 }

@@ -5,6 +5,16 @@ topics:
       description: Backend services
     - slug: websocket
       description: WebSocket lifecycle & events
+    - slug: scraping
+      description: Web scraping, extraction, and crawl orchestration work
+    - slug: nereval
+      description: Nereval property assessment scraper and related application work
+    - slug: proxy
+      description: HTTP proxy configuration and usage
+    - slug: sqlite
+      description: SQLite schema, query, and persistence work
+    - slug: queue
+      description: Job queue, task queue, and background work orchestration
 docTypes:
     - slug: design-doc
       description: Structured rationale and architecture notes
