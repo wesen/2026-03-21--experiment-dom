@@ -65,16 +65,13 @@ function buildInit(init = {}) {
  * Fetch with retry and exponential backoff.
  * Retries on 403, 429, 500, 502, 503, 529.
  */
-async function fetchWithRetry(url, init = {}, { maxRetries = 3, baseDelay = 2000 } = {}) {
+async function fetchWithRetry(url, init = {}, { maxRetries = 7, baseDelay = 2000, maxDelay = 120000 } = {}) {
   const finalInit = buildInit(init);
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      // Node's fetch doesn't support `dispatcher` for proxy — use the agent's fetch if available
       let res;
       if (proxyAgent) {
-        // https-proxy-agent works with Node's http/https modules, not fetch directly.
-        // Use a wrapper that creates a proper request through the proxy.
         res = await fetchViaProxy(url, finalInit);
       } else {
         res = await fetch(url, init);
@@ -82,19 +79,19 @@ async function fetchWithRetry(url, init = {}, { maxRetries = 3, baseDelay = 2000
 
       if (res.ok) return res;
 
-      const retryable = [403, 429, 500, 502, 503, 529].includes(res.status);
+      const retryable = [403, 429, 500, 502, 503, 504, 529].includes(res.status);
       if (!retryable || attempt === maxRetries) {
         const body = await res.text();
         throw new Error(`HTTP ${res.status} for ${url} (after ${attempt + 1} attempts): ${body.slice(0, 200)}`);
       }
 
-      const delay = baseDelay * Math.pow(2, attempt) + Math.random() * 1000;
+      const delay = Math.min(baseDelay * Math.pow(2, attempt) + Math.random() * 1000, maxDelay);
       console.error(`  [retry] HTTP ${res.status} — waiting ${(delay / 1000).toFixed(1)}s (attempt ${attempt + 1}/${maxRetries})...`);
       await sleep(delay);
     } catch (err) {
       if (attempt === maxRetries) throw err;
-      if (err.message.includes('HTTP ')) throw err; // don't retry our own thrown errors
-      const delay = baseDelay * Math.pow(2, attempt) + Math.random() * 1000;
+      if (err.message.includes('HTTP ')) throw err;
+      const delay = Math.min(baseDelay * Math.pow(2, attempt) + Math.random() * 1000, maxDelay);
       console.error(`  [retry] ${err.message.slice(0, 80)} — waiting ${(delay / 1000).toFixed(1)}s (attempt ${attempt + 1}/${maxRetries})...`);
       await sleep(delay);
     }

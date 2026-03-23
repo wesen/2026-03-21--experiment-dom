@@ -471,7 +471,7 @@ function saveViewstate(db, { town, pageNumber, viewState, eventValidation }) {
   `).run(town, pageNumber, viewState, eventValidation);
 }
 
-function getViewstate(db, town, pageNumber, maxAgeMinutes = 15) {
+function getViewstate(db, town, pageNumber, maxAgeMinutes = 2880) {
   const row = db.prepare(`
     SELECT * FROM viewstates
     WHERE town = ? AND page_number = ?
