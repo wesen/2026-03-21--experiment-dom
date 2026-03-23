@@ -81,11 +81,29 @@ WhenToUse: "When reviewing what was built and why"
 
 **What Worked:** Full round-trip. Queue survived cancel and resume. No duplicate fetches. Viewstate cached and visible in UI. INSERT OR IGNORE correctly skipped already-known properties.
 
+## Step 6: Queue tab, pagination, external links (Post-plan enhancement)
+
+**Prompt Context:** User wants to see the detail queue, open properties on nereval.com in new tabs, and pagination on all tables since data will grow to ~1M rows.
+
+**What I Did:**
+- Added `location` column to `detail_queue` schema, populated during enqueue from list crawl row data
+- Centralized DB migrations in `openDb()` → `migrate()` function: adds missing columns + backfills queue locations from properties table on startup
+- Added Queue tab (6th tab) with: status filter dropdown, search by account/address, paginated table showing account, location, status badge, attempts, last error, external link
+- Added `renderPager(el, offset, limit, total, loadFn)` reusable pagination component: prev/next buttons, "Page X of Y (N total)" display
+- Added pagination to Properties table (50 per page)
+- Added external link icon (↗) next to property locations, opens `https://data.nereval.com/PropertyDetail.aspx?...` in new tab
+- Properties API now returns `detail_url` for link generation
+- `getQueueItems` now returns `{rows, total, limit, offset}` for pagination and accepts `search` param
+
+**What Didn't Work:** Initially put the `location` column migration inside `enqueueDetail()` — but it only ran when enqueueing, not on app startup. Moved all migrations to `openDb()` → `migrate()` for consistency. Also needed to backfill existing queue items that were created before the column existed.
+
+**What I Learned:** Centralized migration function in `openDb()` is the right pattern — runs once on startup, handles all schema evolution in one place. The `addCol` helper with try/catch is clean for SQLite (no `IF NOT EXISTS` for ALTER TABLE).
+
 ## Current State
 
-All 12 tasks complete. The scraper now supports:
-- `mode=list_only`: crawl pages, populate queue, cache viewstates
-- `mode=details_only`: fetch from queue, resume after interruption
-- `mode=full`: both phases sequentially (default, backwards compatible)
-- Queue visible in Scraper tab with stats and management buttons
-- Viewstate cache display shows cached pages and freshness
+All original tasks complete, plus enhancements:
+- 6 tabs: Properties, Landlords, Biggest, Multi-Unit, Queue, Scraper
+- Queue tab: full view of detail_queue with search, filter, pagination, external links
+- Properties: paginated (50/page), external links to nereval.com
+- Scraper tab: job form with mode dropdown, queue stats, viewstate cache info
+- Pagination ready to handle 1M+ rows
