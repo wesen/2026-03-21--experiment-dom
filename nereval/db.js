@@ -132,6 +132,33 @@ function createTables(db) {
       key   TEXT PRIMARY KEY,
       value TEXT
     );
+
+    -- Detail fetch queue: persistent work items for phase 2
+    CREATE TABLE IF NOT EXISTS detail_queue (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      account_number  TEXT NOT NULL,
+      detail_url      TEXT NOT NULL,
+      town            TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      job_id          INTEGER,
+      attempts        INTEGER DEFAULT 0,
+      last_error      TEXT,
+      last_attempt_at TEXT,
+      completed_at    TEXT,
+      UNIQUE(account_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_detail_queue_status ON detail_queue(status);
+
+    -- Cached ASP.NET viewstates for page position resume
+    CREATE TABLE IF NOT EXISTS viewstates (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      town             TEXT NOT NULL,
+      page_number      INTEGER NOT NULL,
+      view_state       TEXT NOT NULL,
+      event_validation TEXT NOT NULL,
+      fetched_at       TEXT DEFAULT (datetime('now')),
+      UNIQUE(town, page_number)
+    );
   `);
 }
 
@@ -257,11 +284,15 @@ function storeDetail(db, accountNumber, detail) {
 
 // ── Job CRUD ────────────────────────────────────────────────────────────────
 
-function createJob(db, { town, startPage = 1, endPage = 3, workers = 1, rps = 1, useProxy = false, noDetails = false }) {
+function createJob(db, { town, startPage = 1, endPage = 3, workers = 1, rps = 1, useProxy = false, noDetails = false, mode = 'full' }) {
+  // Ensure mode column exists (migration for existing DBs)
+  try { db.prepare("SELECT mode FROM jobs LIMIT 0").get(); } catch {
+    db.exec("ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'full'");
+  }
   const info = db.prepare(`
-    INSERT INTO jobs (town, status, start_page, end_page, workers, rps, use_proxy, no_details)
-    VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)
-  `).run(town, startPage, endPage, workers, rps, useProxy ? 1 : 0, noDetails ? 1 : 0);
+    INSERT INTO jobs (town, status, start_page, end_page, workers, rps, use_proxy, no_details, mode)
+    VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+  `).run(town, startPage, endPage, workers, rps, useProxy ? 1 : 0, noDetails ? 1 : 0, mode);
   return info.lastInsertRowid;
 }
 
@@ -332,8 +363,125 @@ function setConfigBulk(db, obj) {
   tx();
 }
 
+// ── Detail Queue CRUD ────────────────────────────────────────────────────────
+
+function enqueueDetail(db, { accountNumber, detailUrl, town, jobId = null }) {
+  db.prepare(`
+    INSERT OR IGNORE INTO detail_queue (account_number, detail_url, town, job_id)
+    VALUES (?, ?, ?, ?)
+  `).run(accountNumber, detailUrl, town, jobId);
+}
+
+/**
+ * Atomically claim the next pending queue item. Returns the row or null.
+ */
+const claimNextDetail = function(db) {
+  const tx = db.transaction(() => {
+    const item = db.prepare(
+      "SELECT * FROM detail_queue WHERE status = 'pending' LIMIT 1"
+    ).get();
+    if (!item) return null;
+    db.prepare(
+      "UPDATE detail_queue SET status = 'in_progress', last_attempt_at = datetime('now') WHERE id = ?"
+    ).run(item.id);
+    return { ...item, status: 'in_progress' };
+  });
+  return tx();
+};
+
+function markDetailDone(db, id) {
+  db.prepare(
+    "UPDATE detail_queue SET status = 'done', completed_at = datetime('now') WHERE id = ?"
+  ).run(id);
+}
+
+function markDetailFailed(db, id, error) {
+  db.prepare(
+    "UPDATE detail_queue SET status = 'failed', attempts = attempts + 1, last_error = ? WHERE id = ?"
+  ).run(error, id);
+}
+
+function resetInProgressDetails(db) {
+  const info = db.prepare(
+    "UPDATE detail_queue SET status = 'pending' WHERE status = 'in_progress'"
+  ).run();
+  return info.changes;
+}
+
+function getQueueStats(db) {
+  const rows = db.prepare(
+    "SELECT status, COUNT(*) as count FROM detail_queue GROUP BY status"
+  ).all();
+  const stats = { pending: 0, in_progress: 0, done: 0, failed: 0, total: 0 };
+  for (const { status, count } of rows) {
+    stats[status] = count;
+    stats.total += count;
+  }
+  return stats;
+}
+
+function getQueueItems(db, { status = null, limit = 50, offset = 0 } = {}) {
+  if (status) {
+    return db.prepare(
+      'SELECT * FROM detail_queue WHERE status = ? ORDER BY id LIMIT ? OFFSET ?'
+    ).all(status, limit, offset);
+  }
+  return db.prepare(
+    'SELECT * FROM detail_queue ORDER BY id LIMIT ? OFFSET ?'
+  ).all(limit, offset);
+}
+
+function retryFailedDetails(db, { maxAttempts = 10 } = {}) {
+  const info = db.prepare(
+    "UPDATE detail_queue SET status = 'pending', last_error = NULL WHERE status = 'failed' AND attempts < ?"
+  ).run(maxAttempts);
+  return info.changes;
+}
+
+function clearDoneDetails(db) {
+  const info = db.prepare("DELETE FROM detail_queue WHERE status = 'done'").run();
+  return info.changes;
+}
+
+// ── Viewstate Cache CRUD ────────────────────────────────────────────────────
+
+function saveViewstate(db, { town, pageNumber, viewState, eventValidation }) {
+  db.prepare(`
+    INSERT INTO viewstates (town, page_number, view_state, event_validation)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(town, page_number) DO UPDATE SET
+      view_state = excluded.view_state,
+      event_validation = excluded.event_validation,
+      fetched_at = datetime('now')
+  `).run(town, pageNumber, viewState, eventValidation);
+}
+
+function getViewstate(db, town, pageNumber, maxAgeMinutes = 15) {
+  const row = db.prepare(`
+    SELECT * FROM viewstates
+    WHERE town = ? AND page_number = ?
+      AND fetched_at > datetime('now', '-' || ? || ' minutes')
+  `).get(town, pageNumber, maxAgeMinutes);
+  return row || null;
+}
+
+function listViewstates(db, town) {
+  return db.prepare(`
+    SELECT page_number, fetched_at,
+      ROUND((julianday('now') - julianday(fetched_at)) * 24 * 60, 1) as age_minutes
+    FROM viewstates WHERE town = ? ORDER BY page_number
+  `).all(town);
+}
+
+function clearViewstates(db, town) {
+  db.prepare('DELETE FROM viewstates WHERE town = ?').run(town);
+}
+
 module.exports = {
   openDb, upsertProperty, storeDetail,
   createJob, getJob, listJobs, updateJob, recoverJobs,
   getConfig, getConfigValue, setConfig, setConfigBulk,
+  enqueueDetail, claimNextDetail, markDetailDone, markDetailFailed,
+  resetInProgressDetails, getQueueStats, getQueueItems, retryFailedDetails, clearDoneDetails,
+  saveViewstate, getViewstate, listViewstates, clearViewstates,
 };
