@@ -1,6 +1,6 @@
-// server/property-browser.mjs — Web UI for browsing nereval property data
+// nereval/browser.mjs — Web UI for browsing nereval property data
 //
-// Usage: node server/property-browser.mjs [--db nereval-providence.db] [--port 3000]
+// Usage: node nereval/browser.mjs [--db nereval-providence.db] [--port 3000]
 
 import express from 'express';
 import Database from 'better-sqlite3';
@@ -12,7 +12,7 @@ const PROJECT_ROOT = join(__dirname, '..');
 
 // Parse args
 const args = process.argv.slice(2);
-let dbPath = join(PROJECT_ROOT, 'nereval-providence.db');
+let dbPath = join(__dirname, 'nereval-providence.db');
 let port = 3000;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--db') dbPath = args[++i];

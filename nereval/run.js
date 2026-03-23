@@ -1,11 +1,11 @@
 // 40-nereval-run.js — Scrape nereval property list + detail pages, store in SQLite
 
-const { fetchListPage, fetchNextPage, getFormState, hasNextPage, fetchDetailPage } = require('./37-nereval-fetch');
-const { extractListRows, extractDetail } = require('./38-nereval-extract');
-const { openDb, upsertProperty, storeDetail } = require('./39-nereval-db');
+const { fetchListPage, fetchNextPage, getFormState, hasNextPage, fetchDetailPage, setProxy } = require('./fetch');
+const { extractListRows, extractDetail } = require('./extract');
+const { openDb, upsertProperty, storeDetail } = require('./db');
 
 const HELP = `
-Usage: node 40-nereval-run.js [options]
+Usage: node nereval/run.js [options]
 
 Scrapes property data from data.nereval.com and stores it in SQLite.
 Crawls the paginated list, then fetches each property's detail page.
@@ -20,16 +20,19 @@ Options:
   --no-details      Skip detail page fetching. Only crawl the list.
   --workers <N>     Parallel workers for detail fetching (default: 1)
   --rps <N>         Max requests/second across all workers (default: 1)
+  --proxy <url>     HTTP proxy URL (e.g. http://user:pass@host:port)
+                    Also reads NEREVAL_PROXY or HTTPS_PROXY env vars.
   --help, -h        Show this help message
 
 Examples:
-  node 40-nereval-run.js                            # Providence, pages 1-3, 1 rps
-  node 40-nereval-run.js --pages 10                 # first 10 pages
-  node 40-nereval-run.js --pages all                # all pages
-  node 40-nereval-run.js --start 3 --pages 7        # pages 3 through 7
-  node 40-nereval-run.js --workers 3 --rps 2        # 3 workers, max 2 req/s
-  node 40-nereval-run.js --no-details --pages all   # list crawl only (fast)
-  node 40-nereval-run.js --town Cranston --pages 5  # different town
+  node nereval/run.js                               # Providence, pages 1-3, 1 rps
+  node nereval/run.js --pages 10                    # first 10 pages
+  node nereval/run.js --pages all                   # all pages
+  node nereval/run.js --start 3 --pages 7           # pages 3 through 7
+  node nereval/run.js --workers 3 --rps 2           # 3 workers, max 2 req/s
+  node nereval/run.js --no-details --pages all      # list crawl only (fast)
+  node nereval/run.js --town Cranston --pages 5     # different town
+  node nereval/run.js --proxy http://user:pass@proxy:8000  # via proxy
 `.trim();
 
 function parseArgs() {
@@ -38,7 +41,7 @@ function parseArgs() {
     console.log(HELP);
     process.exit(0);
   }
-  const opts = { town: 'Providence', pages: 3, start: 1, db: null, delay: 500, noDetails: false, workers: 1, rps: 1 };
+  const opts = { town: 'Providence', pages: 3, start: 1, db: null, delay: 500, noDetails: false, workers: 1, rps: 1, proxy: null };
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--town') opts.town = args[++i];
     else if (args[i] === '--pages') opts.pages = args[i + 1] === 'all' ? Infinity : parseInt(args[++i]);
@@ -48,6 +51,7 @@ function parseArgs() {
     else if (args[i] === '--no-details') opts.noDetails = true;
     else if (args[i] === '--workers') opts.workers = parseInt(args[++i]);
     else if (args[i] === '--rps') opts.rps = parseFloat(args[++i]);
+    else if (args[i] === '--proxy') opts.proxy = args[++i];
   }
   if (!opts.db) opts.db = `nereval-${opts.town.toLowerCase()}.db`;
   return opts;
@@ -128,9 +132,18 @@ async function fetchDetailsParallel(db, accounts, opts) {
 
 async function main() {
   const opts = parseArgs();
+
+  // Configure proxy
+  const proxyUrl = opts.proxy || process.env.NEREVAL_PROXY || process.env.HTTPS_PROXY || null;
+  if (proxyUrl) {
+    setProxy(proxyUrl);
+    console.log(`Using proxy: ${proxyUrl.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}`);
+  }
+
   const pagesLabel = opts.pages === Infinity ? 'all' : opts.pages;
   const workerLabel = opts.workers > 1 ? `, ${opts.workers} workers @ ${opts.rps} rps` : '';
-  console.log(`Scraping nereval: town=${opts.town}, pages=${opts.start}-${pagesLabel}, db=${opts.db}, delay=${opts.delay}ms${workerLabel}`);
+  const proxyLabel = proxyUrl ? ', via proxy' : '';
+  console.log(`Scraping nereval: town=${opts.town}, pages=${opts.start}-${pagesLabel}, db=${opts.db}, delay=${opts.delay}ms${workerLabel}${proxyLabel}`);
 
   const db = openDb(opts.db);
 
