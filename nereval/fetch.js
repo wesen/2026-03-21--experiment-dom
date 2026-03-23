@@ -1,6 +1,15 @@
 // nereval/fetch.js — Fetch nereval pages with ASP.NET form state, proxy support, retry
 const { JSDOM } = require('jsdom');
-const { HttpsProxyAgent } = require('https-proxy-agent');
+
+// https-proxy-agent is ESM-only; lazy-load via dynamic import()
+let HttpsProxyAgent = null;
+async function getHttpsProxyAgent() {
+  if (!HttpsProxyAgent) {
+    const mod = await import('https-proxy-agent');
+    HttpsProxyAgent = mod.HttpsProxyAgent;
+  }
+  return HttpsProxyAgent;
+}
 
 const BASE_URL = 'https://data.nereval.com';
 const HEADERS = {
@@ -21,14 +30,15 @@ let proxyUrl = null;
  * Also supports the curl-style format user:pass@host:port (prepends http://)
  * @param {string} url
  */
-function setProxy(url) {
+async function setProxy(url) {
   if (!url) { proxyAgent = null; proxyUrl = null; return; }
   // Normalize: if no scheme, prepend http://
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     url = 'http://' + url;
   }
   proxyUrl = url;
-  proxyAgent = new HttpsProxyAgent(url);
+  const Agent = await getHttpsProxyAgent();
+  proxyAgent = new Agent(url);
 }
 
 /**

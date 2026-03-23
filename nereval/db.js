@@ -102,6 +102,36 @@ function createTables(db) {
       address3        TEXT,
       UNIQUE(account_number)
     );
+
+    -- Job queue: tracks scrape jobs and their progress
+    CREATE TABLE IF NOT EXISTS jobs (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      town            TEXT NOT NULL,
+      status          TEXT NOT NULL DEFAULT 'queued',
+      start_page      INTEGER DEFAULT 1,
+      end_page        INTEGER DEFAULT 3,
+      workers         INTEGER DEFAULT 1,
+      rps             REAL DEFAULT 1.0,
+      use_proxy       INTEGER DEFAULT 0,
+      no_details      INTEGER DEFAULT 0,
+      created_at      TEXT DEFAULT (datetime('now')),
+      started_at      TEXT,
+      finished_at     TEXT,
+      pages_done      INTEGER DEFAULT 0,
+      rows_found      INTEGER DEFAULT 0,
+      details_done    INTEGER DEFAULT 0,
+      details_total   INTEGER DEFAULT 0,
+      errors          INTEGER DEFAULT 0,
+      error_msg       TEXT,
+      properties_added   INTEGER DEFAULT 0,
+      properties_updated INTEGER DEFAULT 0
+    );
+
+    -- Persistent configuration (key-value)
+    CREATE TABLE IF NOT EXISTS config (
+      key   TEXT PRIMARY KEY,
+      value TEXT
+    );
   `);
 }
 
@@ -225,4 +255,85 @@ function storeDetail(db, accountNumber, detail) {
   `).run(accountNumber, l['Land Area'] || '', l['View - Neighborhood'] || l['Neighborhood'] || '');
 }
 
-module.exports = { openDb, upsertProperty, storeDetail };
+// ── Job CRUD ────────────────────────────────────────────────────────────────
+
+function createJob(db, { town, startPage = 1, endPage = 3, workers = 1, rps = 1, useProxy = false, noDetails = false }) {
+  const info = db.prepare(`
+    INSERT INTO jobs (town, status, start_page, end_page, workers, rps, use_proxy, no_details)
+    VALUES (?, 'queued', ?, ?, ?, ?, ?, ?)
+  `).run(town, startPage, endPage, workers, rps, useProxy ? 1 : 0, noDetails ? 1 : 0);
+  return info.lastInsertRowid;
+}
+
+function getJob(db, id) {
+  return db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
+}
+
+function listJobs(db, limit = 50) {
+  return db.prepare('SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?').all(limit);
+}
+
+function updateJob(db, id, fields) {
+  const allowed = [
+    'status', 'started_at', 'finished_at', 'pages_done', 'rows_found',
+    'details_done', 'details_total', 'errors', 'error_msg',
+    'properties_added', 'properties_updated',
+  ];
+  const sets = [];
+  const vals = [];
+  for (const [k, v] of Object.entries(fields)) {
+    if (allowed.includes(k)) {
+      sets.push(`${k} = ?`);
+      vals.push(v);
+    }
+  }
+  if (sets.length === 0) return;
+  vals.push(id);
+  db.prepare(`UPDATE jobs SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+}
+
+/**
+ * Mark any running jobs as failed (crash recovery on startup).
+ */
+function recoverJobs(db) {
+  const stale = db.prepare("SELECT id FROM jobs WHERE status = 'running'").all();
+  if (stale.length > 0) {
+    db.prepare("UPDATE jobs SET status = 'failed', error_msg = 'Server restarted', finished_at = datetime('now') WHERE status = 'running'").run();
+  }
+  return stale.length;
+}
+
+// ── Config CRUD ─────────────────────────────────────────────────────────────
+
+function getConfig(db) {
+  const rows = db.prepare('SELECT key, value FROM config').all();
+  const cfg = {};
+  for (const { key, value } of rows) cfg[key] = value;
+  return cfg;
+}
+
+function getConfigValue(db, key, defaultValue = null) {
+  const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
+  return row ? row.value : defaultValue;
+}
+
+function setConfig(db, key, value) {
+  db.prepare('INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+    .run(key, value);
+}
+
+function setConfigBulk(db, obj) {
+  const stmt = db.prepare('INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+  const tx = db.transaction(() => {
+    for (const [k, v] of Object.entries(obj)) {
+      stmt.run(k, v == null ? '' : String(v));
+    }
+  });
+  tx();
+}
+
+module.exports = {
+  openDb, upsertProperty, storeDetail,
+  createJob, getJob, listJobs, updateJob, recoverJobs,
+  getConfig, getConfigValue, setConfig, setConfigBulk,
+};

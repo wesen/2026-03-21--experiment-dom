@@ -136,7 +136,7 @@ async function main() {
   // Configure proxy
   const proxyUrl = opts.proxy || process.env.NEREVAL_PROXY || process.env.HTTPS_PROXY || null;
   if (proxyUrl) {
-    setProxy(proxyUrl);
+    await setProxy(proxyUrl);
     console.log(`Using proxy: ${proxyUrl.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}`);
   }
 
