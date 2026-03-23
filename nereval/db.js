@@ -9,7 +9,25 @@ function openDb(dbPath = DEFAULT_DB_PATH) {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   createTables(db);
+  migrate(db);
   return db;
+}
+
+function migrate(db) {
+  // Add columns that may be missing in older DBs
+  const addCol = (table, col, type) => {
+    try { db.prepare(`SELECT ${col} FROM ${table} LIMIT 0`).get(); } catch {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+    }
+  };
+  addCol('detail_queue', 'location', 'TEXT');
+  addCol('jobs', 'mode', "TEXT NOT NULL DEFAULT 'full'");
+  // Backfill queue locations from properties
+  db.prepare(`
+    UPDATE detail_queue SET location = (
+      SELECT location FROM properties WHERE properties.account_number = detail_queue.account_number
+    ) WHERE location IS NULL
+  `).run();
 }
 
 function createTables(db) {
@@ -286,10 +304,6 @@ function storeDetail(db, accountNumber, detail) {
 // ── Job CRUD ────────────────────────────────────────────────────────────────
 
 function createJob(db, { town, startPage = 1, endPage = 3, workers = 1, rps = 1, useProxy = false, noDetails = false, mode = 'full' }) {
-  // Ensure mode column exists (migration for existing DBs)
-  try { db.prepare("SELECT mode FROM jobs LIMIT 0").get(); } catch {
-    db.exec("ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'full'");
-  }
   const info = db.prepare(`
     INSERT INTO jobs (town, status, start_page, end_page, workers, rps, use_proxy, no_details, mode)
     VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?)
@@ -367,10 +381,6 @@ function setConfigBulk(db, obj) {
 // ── Detail Queue CRUD ────────────────────────────────────────────────────────
 
 function enqueueDetail(db, { accountNumber, detailUrl, town, location = null, jobId = null }) {
-  // Migrate existing DBs missing location column
-  try { db.prepare("SELECT location FROM detail_queue LIMIT 0").get(); } catch {
-    db.exec("ALTER TABLE detail_queue ADD COLUMN location TEXT");
-  }
   db.prepare(`
     INSERT OR IGNORE INTO detail_queue (account_number, detail_url, town, location, job_id)
     VALUES (?, ?, ?, ?, ?)

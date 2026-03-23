@@ -299,9 +299,10 @@ app.get('/api/queue/stats', (req, res) => {
 
 app.get('/api/queue', (req, res) => {
   const status = req.query.status || null;
+  const search = req.query.search || null;
   const limit = parseInt(req.query.limit) || 50;
   const offset = parseInt(req.query.offset) || 0;
-  res.json(getQueueItems(db, { status, limit, offset }));
+  res.json(getQueueItems(db, { status, search, limit, offset }));
 });
 
 app.post('/api/queue/retry-failed', (req, res) => {
@@ -490,7 +491,7 @@ app.get('/api/properties', (req, res) => {
 
   const sql = `
     SELECT
-      p.account_number, p.location, p.map_lot,
+      p.account_number, p.location, p.map_lot, p.detail_url,
       a.parcel_total as assessed_value, a.land_value, a.building_value,
       CAST(REPLACE(REPLACE(a.parcel_total, '$', ''), ',', '') AS INTEGER) as value_num,
       b.design, b.year_built, b.rooms, b.bedrooms, b.bathrooms, b.above_grade_area,
@@ -730,6 +731,15 @@ const HTML = `<!DOCTYPE html>
   .proxy-test-result.ok { background: #1a3a2a; color: #3fb950; }
   .proxy-test-result.fail { background: #3d1418; color: #f85149; }
 
+  /* Pagination */
+  .pager { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; color: #8b949e; }
+  .pager button { background: #21262d; border: 1px solid #30363d; color: #e1e4e8; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .pager button:hover { border-color: #58a6ff; }
+  .pager button:disabled { opacity: 0.4; cursor: default; border-color: #30363d; }
+  .pager .page-info { flex: 1; text-align: center; }
+  .ext-link { color: #8b949e; font-size: 11px; margin-left: 4px; }
+  .ext-link:hover { color: #58a6ff; }
+
   @media (max-width: 768px) {
     .chart-row { grid-template-columns: 1fr; }
     .stats-grid { grid-template-columns: repeat(2, 1fr); }
@@ -754,6 +764,7 @@ const HTML = `<!DOCTYPE html>
     <div class="tab" data-tab="landlords">Top Landlords</div>
     <div class="tab" data-tab="biggest">Biggest</div>
     <div class="tab" data-tab="multiunit">Multi-Unit</div>
+    <div class="tab" data-tab="queue">Queue</div>
     <div class="tab" data-tab="scraper">Scraper</div>
   </div>
 
@@ -768,9 +779,10 @@ const HTML = `<!DOCTYPE html>
         <option value="year">Sort: Year Built</option>
         <option value="area-desc">Sort: Area (large)</option>
       </select>
-      <button onclick="loadProperties()">Search</button>
+      <button onclick="propPage=0;loadProperties()">Search</button>
     </div>
     <div id="properties-table"></div>
+    <div id="properties-pager" class="pager"></div>
   </div>
 
   <div class="tab-content" id="tab-landlords">
@@ -817,6 +829,23 @@ const HTML = `<!DOCTYPE html>
     </div>
     <div id="multiunit-summary" style="margin-bottom:16px"></div>
     <div id="multiunit-table"></div>
+  </div>
+
+  <div class="tab-content" id="tab-queue">
+    <div class="search-bar">
+      <input type="text" id="queue-search" placeholder="Search account # or address...">
+      <select id="queue-filter" onchange="loadQueue()">
+        <option value="">All statuses</option>
+        <option value="pending">Pending</option>
+        <option value="in_progress">In Progress</option>
+        <option value="done">Done</option>
+        <option value="failed">Failed</option>
+      </select>
+      <button onclick="loadQueue()">Search</button>
+    </div>
+    <div id="queue-table-stats" style="margin-bottom:8px"></div>
+    <div id="queue-table"></div>
+    <div id="queue-pager" class="pager"></div>
   </div>
 
   <div class="tab-content" id="tab-scraper">
@@ -943,6 +972,7 @@ $$('.tab').forEach(t => t.addEventListener('click', () => {
   t.classList.add('active');
   $('#tab-' + t.dataset.tab).classList.add('active');
   if (t.dataset.tab === 'scraper') { loadJobs(); loadQueueStats(); loadViewstates(); }
+  if (t.dataset.tab === 'queue') { loadQueue(); }
 }));
 
 // \\u2500\\u2500 Stats \\u2500\\u2500
@@ -986,18 +1016,39 @@ function barRow(label, value, max) {
 }
 
 // \\u2500\\u2500 Properties \\u2500\\u2500
-function loadProperties() {
+const SITE = 'https://data.nereval.com/';
+const PAGE_SIZE = 50;
+let propPage = 0;
+
+function extLink(detailUrl) {
+  if (!detailUrl) return '';
+  const href = detailUrl.startsWith('http') ? detailUrl : SITE + detailUrl;
+  return ' <a href="' + href + '" target="_blank" rel="noopener" class="ext-link" title="Open on nereval.com">\\u2197</a>';
+}
+
+function renderPager(el, offset, limit, total, loadFn) {
+  const page = Math.floor(offset / limit);
+  const pages = Math.ceil(total / limit);
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML =
+    '<button ' + (page === 0 ? 'disabled' : 'onclick="' + loadFn + '(' + ((page-1)*limit) + ')"') + '>&laquo; Prev</button>' +
+    '<span class="page-info">Page ' + (page+1) + ' of ' + pages + ' (' + fmtN(total) + ' total)</span>' +
+    '<button ' + (page >= pages-1 ? 'disabled' : 'onclick="' + loadFn + '(' + ((page+1)*limit) + ')"') + '>Next &raquo;</button>';
+}
+
+function loadProperties(offset) {
+  if (offset != null) propPage = offset; else offset = propPage;
   const search = $('#search').value;
   const design = $('#design-filter').value;
   const sortVal = $('#sort-select').value;
   const [sort, order] = sortVal.includes('-') ? sortVal.split('-') : [sortVal, 'asc'];
-  const params = new URLSearchParams({ search, sort, order, design, limit: 100 });
+  const params = new URLSearchParams({ search, sort, order, design, limit: PAGE_SIZE, offset });
   fetch('/api/properties?' + params).then(r => r.json()).then(d => {
     $('#properties-table').innerHTML = '<table><thead><tr>' +
       '<th>Location</th><th>Owner(s)</th><th class="text-right">Assessed</th><th>Design</th><th>Year</th><th class="text-right">Area</th><th>Sales</th>' +
       '</tr></thead><tbody>' +
       d.rows.map(r => '<tr onclick="showDetail(\\'' + r.account_number + '\\')" style="cursor:pointer">' +
-        '<td><strong>' + (r.location || '') + '</strong><br><span class="text-mono" style="color:#8b949e">' + (r.account_number || '') + '</span></td>' +
+        '<td><strong>' + (r.location || '') + '</strong>' + extLink(r.detail_url) + '<br><span class="text-mono" style="color:#8b949e">' + (r.account_number || '') + '</span></td>' +
         '<td>' + (r.owners || '').split('; ').slice(0, 2).join('<br>') + (r.owners && r.owners.split('; ').length > 2 ? '<br><span style="color:#8b949e">+' + (r.owners.split('; ').length - 2) + ' more</span>' : '') + '</td>' +
         '<td class="text-right text-mono" style="color:#3fb950">' + (r.assessed_value || '\\u2014') + '</td>' +
         '<td><span class="badge badge-blue">' + (r.design || '\\u2014') + '</span></td>' +
@@ -1005,8 +1056,8 @@ function loadProperties() {
         '<td class="text-right text-mono">' + (r.above_grade_area || '\\u2014') + '</td>' +
         '<td class="text-right">' + (r.sale_count || 0) + '</td>' +
         '</tr>').join('') +
-      '</tbody></table>' +
-      '<p style="margin-top:12px;color:#8b949e;font-size:12px">Showing ' + d.rows.length + ' of ' + d.total + ' properties</p>';
+      '</tbody></table>';
+    renderPager($('#properties-pager'), d.offset, d.limit, d.total, 'loadProperties');
   });
 }
 
@@ -1098,6 +1149,45 @@ function loadBiggest() {
       '</tbody></table>';
   });
 }
+
+// \\u2500\\u2500 Queue Tab \\u2500\\u2500
+let queuePage = 0;
+function loadQueue(offset) {
+  if (offset != null) queuePage = offset; else offset = queuePage;
+  const search = ($('#queue-search') || {}).value || '';
+  const status = ($('#queue-filter') || {}).value || '';
+  const params = new URLSearchParams({ search, status, limit: PAGE_SIZE, offset });
+  fetch('/api/queue?' + params).then(r => r.json()).then(d => {
+    // Stats bar
+    fetch('/api/queue/stats').then(r => r.json()).then(s => {
+      $('#queue-table-stats').innerHTML =
+        '<span class="badge badge-blue">' + s.pending + ' pending</span> ' +
+        '<span class="badge badge-orange">' + s.in_progress + ' in progress</span> ' +
+        '<span class="badge badge-green">' + s.done + ' done</span> ' +
+        '<span class="badge badge-red">' + s.failed + ' failed</span> ' +
+        '<span style="color:#8b949e;font-size:12px;margin-left:8px">' + s.total + ' total</span>';
+    });
+
+    const statusBadge = s => {
+      const cls = { pending: 'badge-blue', in_progress: 'badge-orange', done: 'badge-green', failed: 'badge-red' }[s] || '';
+      return '<span class="badge ' + cls + '">' + s + '</span>';
+    };
+    $('#queue-table').innerHTML = '<table><thead><tr>' +
+      '<th>Account</th><th>Location</th><th>Status</th><th>Attempts</th><th>Last Error</th><th>Link</th>' +
+      '</tr></thead><tbody>' +
+      d.rows.map(r => '<tr>' +
+        '<td class="text-mono">' + r.account_number + '</td>' +
+        '<td>' + (r.location || '\\u2014') + '</td>' +
+        '<td>' + statusBadge(r.status) + '</td>' +
+        '<td class="text-right">' + (r.attempts || 0) + '</td>' +
+        '<td style="font-size:11px;color:#f85149;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + (r.last_error || '').replace(/"/g, '&quot;') + '">' + (r.last_error || '\\u2014') + '</td>' +
+        '<td><a href="' + SITE + r.detail_url + '" target="_blank" rel="noopener" class="ext-link">\\u2197 Open</a></td>' +
+        '</tr>').join('') +
+      '</tbody></table>';
+    renderPager($('#queue-pager'), d.offset, d.limit, d.total, 'loadQueue');
+  });
+}
+$('#queue-search')?.addEventListener('keydown', e => { if (e.key === 'Enter') { queuePage=0; loadQueue(); }});
 
 // \\u2500\\u2500 Property Detail Modal \\u2500\\u2500
 function showDetail(acct) {
@@ -1413,7 +1503,7 @@ loadBiggest();
 loadLandlords();
 loadMultiunit();
 
-$('#search').addEventListener('keydown', e => { if (e.key === 'Enter') loadProperties(); });
+$('#search').addEventListener('keydown', e => { if (e.key === 'Enter') { propPage=0; loadProperties(); }});
 
 // Load config defaults into form
 fetch('/api/config').then(r => r.json()).then(cfg => {
