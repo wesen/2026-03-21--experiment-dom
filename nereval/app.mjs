@@ -19,6 +19,8 @@ const require_ = createRequire(import.meta.url);
 const {
   openDb, createJob, getJob, listJobs, updateJob, recoverJobs,
   getConfig, getConfigValue, setConfigBulk,
+  getQueueStats, getQueueItems, retryFailedDetails, clearDoneDetails, resetInProgressDetails,
+  listViewstates, clearViewstates,
 } = require_('./db');
 const { runScrapeJob } = require_('./worker');
 const { getProxyInfo } = require_('./fetch');
@@ -36,9 +38,11 @@ for (let i = 0; i < args.length; i++) {
 
 const db = openDb(dbPath);
 
-// Crash recovery: mark stale running jobs as failed
+// Crash recovery: mark stale running jobs as failed, reset in_progress queue items
 const recovered = recoverJobs(db);
+const resetItems = resetInProgressDetails(db);
 if (recovered > 0) console.log(`Recovered ${recovered} stale job(s) from previous crash`);
+if (resetItems > 0) console.log(`Reset ${resetItems} in-progress queue item(s) to pending`);
 
 const app = express();
 app.use(express.json());
@@ -65,6 +69,7 @@ app.post('/api/jobs/start', (req, res) => {
     rps = 1,
     useProxy = false,
     noDetails = false,
+    mode = 'full',
   } = req.body || {};
 
   const jobId = createJob(db, {
@@ -75,6 +80,7 @@ app.post('/api/jobs/start', (req, res) => {
     rps: parseFloat(rps),
     useProxy: !!useProxy,
     noDetails: !!noDetails,
+    mode,
   });
 
   startJob(jobId);
@@ -283,6 +289,43 @@ app.post('/api/config/proxy/test', async (req, res) => {
   } catch (err) {
     res.json({ ok: false, error: err.message });
   }
+});
+
+// ── Queue API ───────────────────────────────────────────────────────────────
+
+app.get('/api/queue/stats', (req, res) => {
+  res.json(getQueueStats(db));
+});
+
+app.get('/api/queue', (req, res) => {
+  const status = req.query.status || null;
+  const limit = parseInt(req.query.limit) || 50;
+  const offset = parseInt(req.query.offset) || 0;
+  res.json(getQueueItems(db, { status, limit, offset }));
+});
+
+app.post('/api/queue/retry-failed', (req, res) => {
+  const maxAttempts = parseInt(req.body?.maxAttempts) || 10;
+  const count = retryFailedDetails(db, { maxAttempts });
+  res.json({ ok: true, retried: count });
+});
+
+app.post('/api/queue/clear-done', (req, res) => {
+  const count = clearDoneDetails(db);
+  res.json({ ok: true, cleared: count });
+});
+
+// ── Viewstate API ───────────────────────────────────────────────────────────
+
+app.get('/api/viewstates', (req, res) => {
+  const town = req.query.town || 'Providence';
+  res.json(listViewstates(db, town));
+});
+
+app.post('/api/viewstates/clear', (req, res) => {
+  const town = req.body?.town || 'Providence';
+  clearViewstates(db, town);
+  res.json({ ok: true });
 });
 
 // ── Data Browsing API (from browser.mjs) ────────────────────────────────────
@@ -803,9 +846,10 @@ const HTML = `<!DOCTYPE html>
         </div>
         <div class="form-group">
           <label>Options</label>
-          <select id="job-options">
+          <select id="job-mode">
             <option value="full">Full (list + details)</option>
-            <option value="list-only">List only (no details)</option>
+            <option value="list_only">List only (populate queue)</option>
+            <option value="details_only">Details only (from queue)</option>
           </select>
         </div>
       </div>
@@ -826,6 +870,19 @@ const HTML = `<!DOCTYPE html>
       <div class="progress-bar-outer"><div class="progress-bar-inner" id="progress-bar"></div></div>
       <div class="progress-stats" id="progress-stats"></div>
       <div class="progress-log" id="progress-log"></div>
+    </div>
+
+    <!-- Queue Status -->
+    <div class="job-form" id="queue-status" style="margin-bottom:20px">
+      <h3>Detail Queue</h3>
+      <div class="stats-grid" id="queue-stats" style="margin:12px 0"></div>
+      <div class="form-actions">
+        <button class="btn btn-sm btn-secondary" onclick="retryFailed()">Retry Failed</button>
+        <button class="btn btn-sm btn-secondary" onclick="clearDone()">Clear Completed</button>
+        <button class="btn btn-sm" onclick="startDetailsOnly()">Fetch Pending Details</button>
+        <span id="queue-msg" style="font-size:12px;color:#8b949e;margin-left:8px"></span>
+      </div>
+      <div id="viewstate-info" style="margin-top:12px;font-size:12px;color:#8b949e"></div>
     </div>
 
     <!-- Job History -->
@@ -885,7 +942,7 @@ $$('.tab').forEach(t => t.addEventListener('click', () => {
   $$('.tab-content').forEach(x => x.classList.remove('active'));
   t.classList.add('active');
   $('#tab-' + t.dataset.tab).classList.add('active');
-  if (t.dataset.tab === 'scraper') loadJobs();
+  if (t.dataset.tab === 'scraper') { loadJobs(); loadQueueStats(); loadViewstates(); }
 }));
 
 // \\u2500\\u2500 Stats \\u2500\\u2500
@@ -1094,7 +1151,8 @@ function startJob() {
     workers: parseInt($('#job-workers').value),
     rps: parseFloat($('#job-rps').value),
     useProxy: $('#job-proxy').checked,
-    noDetails: $('#job-options').value === 'list-only',
+    mode: $('#job-mode').value,
+    noDetails: false,
   };
 
   fetch('/api/jobs/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -1178,6 +1236,7 @@ function showProgress(jobId) {
     }
     loadJobs();
     loadStats();
+    loadQueueStats();
   });
 }
 
@@ -1243,6 +1302,57 @@ function retryJob(id) {
     if (d.job_id) { currentJobId = d.job_id; showProgress(d.job_id); }
     loadJobs();
   });
+}
+
+// \\u2500\\u2500 Queue \\u2500\\u2500
+function loadQueueStats() {
+  fetch('/api/queue/stats').then(r => r.json()).then(s => {
+    $('#queue-stats').innerHTML = [
+      '<div class="stat-card"><div class="label">Pending</div><div class="value" style="font-size:20px;color:#58a6ff">' + s.pending + '</div></div>',
+      '<div class="stat-card"><div class="label">In Progress</div><div class="value" style="font-size:20px;color:#d29922">' + s.in_progress + '</div></div>',
+      '<div class="stat-card"><div class="label">Done</div><div class="value" style="font-size:20px;color:#3fb950">' + s.done + '</div></div>',
+      '<div class="stat-card"><div class="label">Failed</div><div class="value" style="font-size:20px;color:#f85149">' + s.failed + '</div></div>',
+      '<div class="stat-card"><div class="label">Total</div><div class="value" style="font-size:20px">' + s.total + '</div></div>',
+    ].join('');
+  });
+}
+function loadViewstates() {
+  const town = $('#job-town').value || 'Providence';
+  fetch('/api/viewstates?town=' + encodeURIComponent(town)).then(r => r.json()).then(vs => {
+    if (!vs.length) { $('#viewstate-info').textContent = 'No cached viewstates for ' + town; return; }
+    const fresh = vs.filter(v => v.age_minutes < 15);
+    $('#viewstate-info').innerHTML = 'Cached viewstates: ' + vs.length + ' pages (' + fresh.length + ' fresh). ' +
+      'Pages: ' + vs.map(v => v.page_number + ' <span style="color:' + (v.age_minutes < 15 ? '#3fb950' : '#f85149') + '">(' + v.age_minutes + 'm)</span>').join(', ');
+  });
+}
+function retryFailed() {
+  fetch('/api/queue/retry-failed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    .then(r => r.json()).then(d => {
+      $('#queue-msg').textContent = 'Retried ' + d.retried + ' items';
+      loadQueueStats();
+    });
+}
+function clearDone() {
+  fetch('/api/queue/clear-done', { method: 'POST' }).then(r => r.json()).then(d => {
+    $('#queue-msg').textContent = 'Cleared ' + d.cleared + ' items';
+    loadQueueStats();
+  });
+}
+function startDetailsOnly() {
+  const body = {
+    town: $('#job-town').value,
+    workers: parseInt($('#job-workers').value),
+    rps: parseFloat($('#job-rps').value),
+    useProxy: $('#job-proxy').checked,
+    mode: 'details_only',
+  };
+  fetch('/api/jobs/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(r => r.json()).then(d => {
+      if (d.error) { alert(d.error); return; }
+      currentJobId = d.job_id;
+      showProgress(d.job_id);
+      loadJobs();
+    });
 }
 
 // \\u2500\\u2500 Settings \\u2500\\u2500
